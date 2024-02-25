@@ -421,10 +421,16 @@ def mbtilesdump(config, output, minzoom, maxzoom, num_threads, source_dbname, so
 
     cur.execute("BEGIN;");
     last_printed_z = 0
+    num_done_this_zoom = 0
+    total_this_zoom = 1
     for tile in all_tiles(minzoom, maxzoom):
         if last_printed_z != tile.zoom:
             last_printed_z = tile.zoom
-            print("Starting z{}...".format(tile.zoom))
+            num_done_this_zoom = 0
+            total_this_zoom = (2**tile.zoom)*(2**tile.zoom)
+            print("\nStarting z{}...".format(tile.zoom))
+        num_done_this_zoom += 1
+        print("z{}, done {:,}, {:5.2f}%".format(tile.zoom, num_done_this_zoom, num_done_this_zoom*100/total_this_zoom), end='\r')
         mvt = kiln.render(tile)
         tile_id = hashlib.md5(mvt).hexdigest()
         cur.execute("INSERT OR IGNORE INTO images (tile_id, tile_data) VALUES (?, ?);", (tile_id, mvt));
