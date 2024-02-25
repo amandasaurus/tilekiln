@@ -13,7 +13,7 @@ from tilekiln.tile import Tile
 from tilekiln.tileset import Tileset
 from tilekiln.storage import Storage
 from tilekiln.kiln import Kiln
-
+import os.path
 
 # Allocated as per https://github.com/prometheus/prometheus/wiki/Default-port-allocations
 PROMETHEUS_PORT = 10013
@@ -358,6 +358,42 @@ def tiles(config, num_threads, source_dbname, source_host, source_port, source_u
         mvt = kiln.render(tile)
         tileset.save_tile(tile, mvt)
 
+@cli.command()
+@click.option('--config', required=True, type=click.Path(exists=True))
+@click.option('--output', required=True, type=click.Path())
+@click.option('--minzoom', default=0, type=int)
+@click.option('--maxzoom', default=14, type=int)
+@click.option('-n', '--num-threads', default=len(os.sched_getaffinity(0)),
+              show_default=True, help='Number of worker processes.')
+@click.option('--source-dbname')
+@click.option('--source-host')
+@click.option('--source-port')
+@click.option('--source-username')
+@click.option('--storage-dbname')
+@click.option('--storage-host')
+@click.option('--storage-port')
+@click.option('--storage-username')
+def tilesdump(config, output, minzoom, maxzoom, num_threads, source_dbname, source_host, source_port, source_username, storage_dbname, storage_host, storage_port, storage_username):
+    c = tilekiln.load_config(config)
+
+    pool = psycopg_pool.NullConnectionPool(kwargs={"dbname": storage_dbname,
+                                                   "host": storage_host,
+                                                   "port": storage_port,
+                                                   "user": storage_username})
+    storage = Storage(pool)
+
+    tileset = Tileset.from_config(storage, c)
+    gen_conn = psycopg.connect(dbname=source_dbname, host=source_host,
+                               port=source_port, username=source_username)
+    kiln = Kiln(c, gen_conn)
+    os.makedirs(output, exist_ok=True)
+    for tile in all_tiles(minzoom, maxzoom):
+        prefix = os.path.join(output, str(tile.zoom), str(tile.x))
+        print(tile)
+        os.makedirs(prefix, exist_ok=True)
+        mvt = kiln.render(tile)
+        with open(os.path.join(prefix, "{}.mvt".format(tile.y)), 'wb') as fp:
+            fp.write(mvt)
 
 @cli.command()
 @click.option('--bind-host', default='0.0.0.0', show_default=True,
@@ -384,3 +420,11 @@ def prometheus(bind_host, bind_port,
     # TODO: make sleep a parameter
     click.echo(f'Running prometheus exporter on http://{bind_host}:{bind_port}/')
     serve_prometheus(storage, bind_host, bind_port, 15)
+
+def all_tiles(minzoom: int, maxzoom: int):
+    zoom = minzoom
+    for zoom in  range(minzoom, maxzoom+1):
+        for x in range(0, 2**zoom):
+            for y in range(0, 2**zoom):
+                yield Tile(zoom, x, y)
+
