@@ -14,6 +14,8 @@ from tilekiln.tileset import Tileset
 from tilekiln.storage import Storage
 from tilekiln.kiln import Kiln
 import os.path
+import sqlite3
+import hashlib
 
 # Allocated as per https://github.com/prometheus/prometheus/wiki/Default-port-allocations
 PROMETHEUS_PORT = 10013
@@ -373,6 +375,77 @@ def tiles(config, num_threads, source_dbname, source_host, source_port, source_u
 @click.option('--storage-host')
 @click.option('--storage-port')
 @click.option('--storage-username')
+def mbtilesdump(config, output, minzoom, maxzoom, num_threads, source_dbname, source_host, source_port, source_username, storage_dbname, storage_host, storage_port, storage_username):
+    c = tilekiln.load_config(config)
+
+    pool = psycopg_pool.NullConnectionPool(kwargs={"dbname": storage_dbname,
+                                                   "host": storage_host,
+                                                   "port": storage_port,
+                                                   "user": storage_username})
+    storage = Storage(pool)
+
+    tileset = Tileset.from_config(storage, c)
+    gen_conn = psycopg.connect(dbname=source_dbname, host=source_host,
+                               port=source_port, username=source_username)
+    kiln = Kiln(c, gen_conn)
+
+    con = sqlite3.connect(output)
+    cur = con.cursor()
+
+    cur.execute("BEGIN;");
+    cur.execute("""CREATE TABLE metadata (name text, value text);""");
+    cur.execute("""INSERT INTO metadata (name, value) VALUES ("name", "Tiles"), ("format", "pbf"), ("bounds", "-180,-90,180,90"), ("center", "0,0,0"), ("type", "baselayer");""");
+    cur.execute("""INSERT INTO metadata (name, value) VALUES ("minzoom", ?), ("maxzoom", ?);""", (minzoom, maxzoom));
+
+    cur.execute("""CREATE TABLE map (
+        zoom_level  INTEGER,
+        tile_column INTEGER,
+        tile_row    INTEGER,
+        tile_id     TEXT);""")
+    cur.execute("""CREATE TABLE images (
+        tile_id   TEXT,
+        tile_data BLOB);""")
+    cur.execute("""CREATE UNIQUE INDEX map_index ON map ( zoom_level, tile_column, tile_row);""");
+    cur.execute("""CREATE UNIQUE INDEX images_id ON images (tile_id);""");
+    cur.execute("""CREATE VIEW tiles AS
+        SELECT
+            map.zoom_level   AS zoom_level,
+            map.tile_column  AS tile_column,
+            map.tile_row     AS tile_row,
+            images.tile_data AS tile_data
+        FROM
+            map JOIN images
+            ON images.tile_id = map.tile_id;
+    """)
+    cur.execute("COMMIT;");
+
+    cur.execute("BEGIN;");
+    last_printed_z = 0
+    for tile in all_tiles(minzoom, maxzoom):
+        if last_printed_z != tile.zoom:
+            last_printed_z = tile.zoom
+            print("Starting z{}...".format(tile.zoom))
+        mvt = kiln.render(tile)
+        tile_id = hashlib.md5(mvt).hexdigest()
+        cur.execute("INSERT OR IGNORE INTO images (tile_id, tile_data) VALUES (?, ?);", (tile_id, mvt));
+        cur.execute("INSERT INTO map (zoom_level, tile_column, tile_row, tile_id) VALUES (?, ?, ?, ?);", (tile.zoom, tile.x, (2**tile.zoom) - tile.y -1, tile_id));
+    cur.execute("COMMIT;");
+
+@cli.command()
+@click.option('--config', required=True, type=click.Path(exists=True))
+@click.option('--output', required=True, type=click.Path())
+@click.option('--minzoom', default=0, type=int)
+@click.option('--maxzoom', default=14, type=int)
+@click.option('-n', '--num-threads', default=len(os.sched_getaffinity(0)),
+              show_default=True, help='Number of worker processes.')
+@click.option('--source-dbname')
+@click.option('--source-host')
+@click.option('--source-port')
+@click.option('--source-username')
+@click.option('--storage-dbname')
+@click.option('--storage-host')
+@click.option('--storage-port')
+@click.option('--storage-username')
 def tilesdump(config, output, minzoom, maxzoom, num_threads, source_dbname, source_host, source_port, source_username, storage_dbname, storage_host, storage_port, storage_username):
     c = tilekiln.load_config(config)
 
@@ -394,6 +467,7 @@ def tilesdump(config, output, minzoom, maxzoom, num_threads, source_dbname, sour
         mvt = kiln.render(tile)
         with open(os.path.join(prefix, "{}.mvt".format(tile.y)), 'wb') as fp:
             fp.write(mvt)
+
 
 @cli.command()
 @click.option('--bind-host', default='0.0.0.0', show_default=True,
